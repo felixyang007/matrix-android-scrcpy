@@ -6,3 +6,6 @@
 /build
 /captures
 .externalNativeBuild
+
+# manual build output (build_without_gradle.sh)
+build_manual/

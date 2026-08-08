@@ -1,8 +1,10 @@
 package com.genymobile.scrcpy;
 
+import com.genymobile.scrcpy.wrappers.ServiceManager;
 import com.genymobile.scrcpy.wrappers.SurfaceControl;
 
 import android.graphics.Rect;
+import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
@@ -81,7 +83,6 @@ public class ScreenEncoder implements Device.RotationListener {
         try {
             do {
                 MediaCodec codec = createCodec(encoderName);
-                IBinder display = createDisplay();
                 ScreenInfo screenInfo = device.getScreenInfo();
                 Rect contentRect = screenInfo.getContentRect();
                 // include the locked video orientation
@@ -92,11 +93,32 @@ public class ScreenEncoder implements Device.RotationListener {
                 int layerStack = device.getLayerStack();
                 setSize(format, videoRect.width(), videoRect.height());
 
+                IBinder display = null;
+                VirtualDisplay virtualDisplay = null;
                 Surface surface = null;
                 try {
                     configure(codec, format);
                     surface = codec.createInputSurface();
-                    setDisplaySurface(display, surface, videoRotation, contentRect, unlockedVideoRect, layerStack);
+
+                    // Since Android 14 (API 34), SurfaceControl.createDisplay(String, boolean) has been removed,
+                    // which caused a black screen on Android 14/15/16+. Prefer the DisplayManager virtual-display
+                    // mirror API, and fall back to the legacy SurfaceControl API on older devices.
+                    try {
+                        virtualDisplay = new ServiceManager().getDisplayManager()
+                                .createVirtualDisplay("scrcpy", videoRect.width(), videoRect.height(), 0, surface);
+                        Ln.i("Display: using DisplayManager API");
+                    } catch (Exception displayManagerException) {
+                        try {
+                            display = createDisplay();
+                            setDisplaySurface(display, surface, videoRotation, contentRect, unlockedVideoRect, layerStack);
+                            Ln.i("Display: using SurfaceControl API");
+                        } catch (Throwable surfaceControlException) {
+                            Ln.e("Could not create display using DisplayManager", displayManagerException);
+                            Ln.e("Could not create display using SurfaceControl", surfaceControlException);
+                            throw new AssertionError("Could not create display");
+                        }
+                    }
+
                     codec.start();
 
                     alive = encode(codec, fd);
@@ -120,7 +142,12 @@ public class ScreenEncoder implements Device.RotationListener {
                     device.setMaxSize(newMaxSize);
                     alive = true;
                 } finally {
-                    destroyDisplay(display);
+                    if (display != null) {
+                        destroyDisplay(display);
+                    }
+                    if (virtualDisplay != null) {
+                        virtualDisplay.release();
+                    }
                     codec.release();
                     if (surface != null) {
                         surface.release();
